@@ -1,18 +1,60 @@
 const express = require("express");
+const Http = require("http");
+const socketIo = require("socket.io");
 const { Op } = require("sequelize");
 const jwt = require("jsonwebtoken");
-const { User, Cart, Goods } = require("./models");
+const { User, Goods, Cart } = require("./models");
 const authMiddleware = require("./middlewares/auth-middleware");
-const {Server} = require("http");
-const socketIo = require("socket.io");
 
 const app = express();
-const http = Server(app);
+const http = Http.createServer(app);
 const io = socketIo(http);
 const router = express.Router();
 
-app.use(express.static("assets"));
-app.use(express.json());
+const socketIdMap = {};
+
+function emitSamePageViewerCount() {
+  const countByUrl = Object.values(socketIdMap).reduce((value, url) => {
+    return {
+      ...value,
+      [url]: value[url] ? value[url] + 1 : 1,
+    };
+  }, {});
+
+  for (const [socketId, url] of Object.entries(socketIdMap)) {
+      const count = countByUrl[url];
+      io.to(socketId).emit("SAME_PAGE_VIEWER_COUNT", count);
+  }
+}
+
+io.on("connection", (socket) => {
+  socketIdMap[socket.id] = null;
+  console.log("누군가 연결했어요!");
+
+  socket.on("CHANGED_PAGE", (data) => {
+    console.log("페이지가 바뀌었대요", data, socket.id);
+    socketIdMap[socket.id] = data;
+
+    emitSamePageViewerCount();
+  });
+
+  socket.on("BUY", (data) => {
+    const payload = {
+      nickname: data.nickname,
+      goodsId: data.goodsId,
+      goodsName: data.goodsName,
+      date: new Date().toISOString(),
+    };
+    console.log("클라이언트가 구매한 데이터", data, new Date());
+    socket.broadcast.emit("BUY_GOODS", payload);
+  });
+
+  socket.on("disconnect", () => {
+    delete socketIdMap[socket.id];
+    console.log("누군가 연결을 끊었어요!");
+    emitSamePageViewerCount();
+  });
+});
 
 router.post("/users", async (req, res) => {
   const { nickname, email, password, confirmPassword } = req.body;
@@ -38,7 +80,7 @@ router.post("/users", async (req, res) => {
 
   await User.create({ email, nickname, password });
 
-  res.status(201).send({ message: "회원 가입에 성공하였습니다." });
+  res.status(201).send({});
 });
 
 router.post("/auth", async (req, res) => {
@@ -115,7 +157,7 @@ router.put("/goods/:goodsId/cart", authMiddleware, async (req, res) => {
   const existsCart = await Cart.findOne({
     where: {
       userId,
-      goodsId,
+      goodsId: Number(goodsId),
     },
   });
 
@@ -125,12 +167,12 @@ router.put("/goods/:goodsId/cart", authMiddleware, async (req, res) => {
   } else {
     await Cart.create({
       userId,
-      goodsId,
+      goodsId: Number(goodsId),
       quantity,
     });
   }
 
-  // NOTE: 성공했을때 응답 값을 클라이언트가 사용하지 않는다.
+  // NOTE: 성공했을때 딱히 정해진 응답 값이 없다.
   res.send({});
 });
 
@@ -144,7 +186,7 @@ router.delete("/goods/:goodsId/cart", authMiddleware, async (req, res) => {
   const existsCart = await Cart.findOne({
     where: {
       userId,
-      goodsId,
+      goodsId: Number(goodsId),
     },
   });
 
@@ -189,46 +231,8 @@ router.get("/goods/:goodsId", authMiddleware, async (req, res) => {
   }
 });
 
-
-/**
- * 상품 등록하기
- * 로그인 없이 상품을 등록하기 위해 AuthMiddleware를 제거했어요!
- */
-router.post("/goods", async (req, res) => {
-  const { goodsId, name, thumbnailUrl, category, price } = req.body;
-
-  const goods = await Goods.findByPk(goodsId);
-  if (goods) {
-    return res.status(400).json({ success: false, errorMessage: "이미 있는 데이터입니다." });
-  }
-
-  const createdGoods = await Goods.create({ goodsId, name, thumbnailUrl, category, price });
-
-  res.status(201).json({ goods: createdGoods });
-});
-
 app.use("/api", express.urlencoded({ extended: false }), router);
-
-io.on("connection", (sock)=>{
-  console.log("새로운 소켓이 연결되었습니다");
-
-
-
-  sock.on("BUY", data =>{
-    console.log(data);
-    const emitData = {
-      nickname:data.nickname,
-      goodsId:data.goodsId,
-      goodsName:data.goodsName,
-      date:new Date().toISOString(),
-    }
-    io.emit("BUY_GOODS",emitData);
-  })
-
-  sock.on("disconnect", ()=>{
-    console.log(sock.id, "해당하는 사용자가 연결이 끊어졌어요!");
-  })
-})
+app.use(express.static("assets"));
 
 http.listen(8080, () => {
   console.log("서버가 요청을 받을 준비가 됐어요");
